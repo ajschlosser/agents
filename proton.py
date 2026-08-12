@@ -31,13 +31,9 @@ POLITICAL_SPAM_FOLDER = "PotentialPoliticalSpam"
 
 
 def decode_text(value):
-# Helper function for decoding email headers
     if not value:
-# Helper function for decoding email headers
         return ""
-# Helper function for decoding email headers
-
-# Helper function for decoding email headers
+    
     result = []
     for data, charset in decode_header(value):
         if isinstance(data, bytes):
