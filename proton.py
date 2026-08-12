@@ -128,7 +128,6 @@ Subject: {subject}
 
     return json.loads(response.json()["message"]["content"])
 
-
 def load_database():
     print(f"Loading database from {DATABASE_FILE}...")
     if not os.path.exists(DATABASE_FILE):
