@@ -21,7 +21,9 @@ import datetime as _dt
 import email
 import imaplib
 import re
+import json
 import os
+import json
 from ollama import Client
 
 from typing import List, Tuple
@@ -83,7 +85,7 @@ def _fetch_unread_since(days: int = 3) -> List[Tuple[str, email.message.EmailMes
     Returns a list of ``(uid, parsed_msg)`` tuples.
     """
     # Calculate date string in IMAP date format (e.g., 01-Jan-2023)
-    since_date = (_dt.datetime.utcnow() - _dt.timedelta(days=days)).strftime("%d-%b-%Y")
+    since_date = (_dt.datetime.utcnow() - _dt.timedelta(hours=10)).strftime("%d-%b-%Y")
 
     if PROTON_IMAP_PORT == 993:
         imap = imaplib.IMAP4_SSL(PROTON_IMAP_HOST, PROTON_IMAP_PORT)
@@ -114,11 +116,82 @@ def _fetch_unread_since(days: int = 3) -> List[Tuple[str, email.message.EmailMes
 # Heuristics to mark important emails -------------------------------------
 _KEYWORDS: List[str] = ["urgent", "action required", "meeting", "important"]
 
-def _is_important(msg: email.message.EmailMessage) -> bool:
-    subject_raw = msg["Subject"] or ""
-    body_raw = _get_plain_body(msg)
-    text = (subject_raw + "\n" + body_raw).lower()
-    return any(keyword in text for keyword in _KEYWORDS)
+def _is_important(msg: email.message.EmailMessage) -> dict:
+    """Return a JSON object describing whether the message is important.
+
+    The function asks the LLM to return the analysis as valid JSON in the
+    exact form shown below. Any deviation from this shape results in the
+    message being marked as not important.
+    ```json
+    {
+        "sender": "email@example.com",
+        "subject": "Subject line",
+        "timestamp": "2026‑08‑11T12:34:56Z",
+        "important": true,
+        "reason": "brief explanation"
+    }
+    ```
+    If the LLM returns any other format, an empty dictionary is returned.
+    """
+    # Basic metadata extraction
+    subject = msg.get("Subject", "")
+    raw_from = msg.get("From", "")
+    sender_addr = email.utils.parseaddr(raw_from)[1]
+    date_header = msg.get("Date")
+    try:
+        dt_obj = email.utils.parsedate_to_datetime(date_header) if date_header else None
+        timestamp_iso = dt_obj.isoformat() if dt_obj else ""
+    except Exception:
+        timestamp_iso = ""
+
+    body_preview = _get_plain_body(msg).strip()[:750]
+
+    prompt = (
+        f"Analyze the following email To determine its important.\n"
+        f"An email is important if it has an urgent impact on personal or family health, finance, or security.\n"
+        f"An email is important ONLY IF it cannot be ignored without grave repercussions for the above.\n"
+        f"Examples of important emails: emails from school, from work, from governments, etc.\n"
+        f"Examples of unimportant emails: marketing, solicitation, community announcements, pet adoptions, politics, social media, etc.\n"
+        f"An email is not important if it can be safely ignored without consequence.\n"
+        f"Output a JSON object with these keys:\n"
+        f"- sender: {sender_addr}\n"
+        f"- subject: {subject}\n"
+        f"- timestamp: {timestamp_iso}\n"
+        f"- important: true/false indicating if the email is important\n"
+        f"- reason: short explanation for the decision\n"
+        f"Provide only the JSON object, nothing else.\n"
+        f"Email Subject: {subject}\n"
+        f"Email Body preview: {body_preview}"
+    )
+    #print(f"Prompting LLM for importance analysis:\n{prompt}\n")
+    client = Client()
+    response = client.chat(model="qwen3:4b", messages=[{"role": "user", "content": prompt}])
+    content = None
+    if hasattr(response, "message"):
+        content = response.message.content.strip()
+    else:
+        # In case of non‑chat responses; unlikely but defensive.
+        if hasattr(response, "json"):
+            try:
+                content = response.json()["content"].strip()
+            except Exception:
+                pass
+    if not content:
+        return {}
+
+    try:
+        result = json.loads(content)
+        # Ensure all required keys are present.
+        req_keys = {"sender", "subject", "timestamp", "important", "reason"}
+
+        print(f"LLM analysis result: {result.get('important', False)} - {result.get('reason', '')}")
+
+        if not isinstance(result, dict) or not req_keys.issubset(result):
+            return {}
+        return result
+    except Exception:
+        return {}
+
 
 # ---------------------------------------------------------------------------
 # Digest generation ------------------------------------------------------------
@@ -126,43 +199,39 @@ def _is_important(msg: email.message.EmailMessage) -> bool:
 def create_digest() -> str:
     """Return a paragraph summarising all important unread emails.
 
-    This function gathers unread, un‑seen Proton Mail messages from the last three days,
-    filters those that are considered *important*, and sends a prompt to an Ollama LLM
-    (e.g. ``llama3``).  The model returns a concise prose paragraph summarising the
-    collected items.
-
-    Returns:
-        A single‑paragraph string produced by the LLM, or a default message if no
-        important emails were found.
+    The function calls ``_is_important`` which now returns a dictionary
+    describing each email. Messages flagged as important are collected,
+    then sent to the LLM for a prose summary.
     """
-    mails = _fetch_unread_since(days=3)
-    important: List[Tuple[str, str, str]] = []
-    for uid, msg in mails:
-        if not _is_important(msg):
+    mails = _fetch_unread_since(days=1)
+    important_items: List[Tuple[dict, email.message.EmailMessage]] = []
+    for uid, current_msg in mails:
+        print(f"Analyzing email UID {uid}...")
+        info = _is_important(current_msg)
+        if not info.get("important"):
             continue
-        sender_raw = msg.get("From", "")
-        name, address = email.utils.parseaddr(sender_raw)
-        subject = msg.get("Subject", "(no subject)")
-        body_text = _get_plain_body(msg).strip()
-        snippet = body_text[:80].replace("\n", " ") + ("…" if len(body_text) > 80 else "")
-        important.append((subject, address or name, snippet))
-
-    if not important:
+        important_items.append((info, current_msg))
+    
+    if not important_items:
         return "No new important emails in the last three days."
-
-    # Build a prompt that lists each email on its own line.
-    body_lines = [f"- {s} from {a}: {p}" for s, a, p in important]
+    
+    body_lines = []
+    for info, current_msg in important_items:
+        snippet_raw = _get_plain_body(current_msg).strip()
+        snippet = snippet_raw[:80].replace("\n", " ") + ('…' if len(snippet_raw) > 80 else "")
+        body_lines.append(f"- {info['subject']} from {info['sender']}: {snippet}")
     prompt_body = "\n".join(body_lines)
     prompt = f"Summarise the following important recent emails into one concise paragraph:\n{prompt_body}"
-
-    # Call Ollama locally.
+    
     client = Client()
-    response = client.chat(model="llama3", messages=[{"role": "user", "content": prompt}])
-    # The ChatResponse contains a Message.  Extract the content safely.
-    if hasattr(response, "message"):
-        return response.message.content.strip()
-    # Fallback to string representation for unexpected responses.
-    return str(response)
+    response = client.chat(model="qwen3:4b", messages=[{"role": "user", "content": prompt}])
+    prompt2 = f"Given {response}, advise as to my next three steps."
+    response2 = client.chat(model="qwen3:4b", messages=[{"role": "user", "content": prompt2}])
+    if hasattr(response2, "message"):
+        return response2.message.content.strip()
+    return str(response2)
+
+
 
 
 # ---------------------------------------------------------------------------
