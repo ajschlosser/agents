@@ -422,3 +422,4 @@ def check_mail():
 if __name__ == "__main__":
     print("Starting Proton Mail political spam classification...")
     check_mail()
+# TODO: This file was modified for testing purposes only. Do not commit test markers.
