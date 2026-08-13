@@ -64,4 +64,4 @@ These files live at the repo root and can be edited or replaced to tune detectio
 
 ## License
 
-MIT
+MIT (tested edit)
