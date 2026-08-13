@@ -1,5 +1,4 @@
-
-"# Copyright (c) 2026 Aaron John Schlosser
+# Copyright (c) 2026 Aaron John Schlosser
 #
 # MIT License
 # 
@@ -18,12 +17,9 @@
 # FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
 # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR AN
 #
-""Generate a summary digest of recent important Proton Mail emails.
+"""Generate a summary digest of recent important Proton Mail emails.
 
-The script mirrors the Proton Bridge connection used in :mod:`proton` but is
-light‑weight: it logs into IMAP, fetches unread messages from the last three
-days, heuristically determines which are *important*, and outputs a one‑paragraph
-summary that can be printed or written to a file.
+The script mirrors the Proton Bridge connection used in :mod:`proton` but is light‑weight: it logs into IMAP, fetches unread messages from the last three days, heuristically determines which are *important*, and outputs a one paragraph summary that can be printed or written to a file.
 
 Environment variables required:
 
@@ -34,21 +30,19 @@ PROTON_IMAP_HOST       # optional, defaults to 127.0.0.1
 PROTON_IMAP_PORT       # optional, defaults to 1143
 ```
 """
-from __future__ import annotations
+
+import datetime
 
 import datetime
 from datetime import timedelta
 import os
-
 import imaplib
 import re
 import json
 from email_utils import decode_text, get_plain_body, LLMClient
 from ollama import Client
 
-
 from typing import List, Tuple
-
 
 # The Proton credentials are required but remain unchanged from the original script.
 try:
@@ -67,17 +61,9 @@ PROTON_IMAP_PORT = int(os.getenv("PROTON_IMAP_PORT", "1143"))
 MODEL = "gpt-oss:20b"
 
 
-
-
-
-
-
-
-
-
 def _fetch_unread_since(days: int = 3) -> List[Tuple[str, email.message.EmailMessage]]:
     """Return unread messages received in the last *days* days.
-
+    
     The UTC date string is formatted for IMAP ``SINCE`` queries.  We always
     connect via SSL unless the user supplies port 1143, which falls back to a plain
     connection with ``STARTTLS``.
@@ -107,15 +93,13 @@ def _fetch_unread_since(days: int = 3) -> List[Tuple[str, email.message.EmailMes
     imap.logout()
     return results
 
-
-
 _KEYWORDS: List[str] = ["urgent", "action required", "meeting", "important"]
 
 def _is_important(msg: email.message.EmailMessage) -> dict:
     """Return the LLM analysis as a structured dict.
 
     The function builds a concise prompt, sends it to Ollama and returns the parsed
-    JSON.  Any parse failure results in an empty dict – callers treat this as not
+    JSON.  Any parse failure results in an empty dict - callers treat this as not
     important.
     """
     subject = msg.get("Subject", "")
@@ -145,12 +129,6 @@ def _is_important(msg: email.message.EmailMessage) -> dict:
         "reason": llm_result.get("reason", ""),
     }
 
-
-
-
-
-
-
 def create_digest() -> str:
     """Return a paragraph summarising all important unread emails.
 
@@ -176,7 +154,7 @@ def create_digest() -> str:
         snippet = snippet_raw[:80].replace("\n", " ") + ('…' if len(snippet_raw) > 80 else "")
         body_lines.append(f"- {info['subject']} from {info['sender']}: {snippet}")
     prompt_body = "\\n".join(body_lines)
-    prompt = f"Summarise the following important recent emails into one concise paragraph:\\n{prompt_body}"
+    prompt = f"Summarise the following important recent emails into one concise paragraph:\n{prompt_body}"
     
     client = Client()
     response = client.chat(model=MODEL, messages=[{"role": "user", "content": prompt}])
@@ -187,18 +165,12 @@ def create_digest() -> str:
     else:
         summary_text = str(response2)
 
-
     # Persist data for later display
     digest_payload = {"emails": [info for info, _ in important_items], "summary": summary_text}
     with open("database-digest.json", "w", encoding="utf-8") as f:
         import json as _json
         _json.dump(digest_payload, f, indent=2)
     return summary_text
-
-
-
-
-
 
 if __name__ == "__main__":  # pragma: no cover - manual running only
     print(create_digest())
