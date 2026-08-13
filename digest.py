@@ -17,13 +17,14 @@ PROTON_IMAP_PORT       # optional, defaults to 1143
 """
 from __future__ import annotations
 
-import datetime as _dt
+import datetime
+from datetime import timedelta
 import email
+# (previous email, re, json, os remain)
 import imaplib
 import re
 import json
 import os
-import json
 from ollama import Client
 
 from typing import List, Tuple
@@ -42,37 +43,46 @@ except KeyError:  # pragma: no cover
 PROTON_IMAP_HOST = os.getenv("PROTON_IMAP_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PROTON_IMAP_PORT = int(os.getenv("PROTON_IMAP_PORT", "1143"))
 
+MODEL = "gpt-oss:20b"
+
 # ---------------------------------------------------------------------------
 # Helper utilities --------------------------------------------------------------
 
 def _get_plain_body(msg: email.message.EmailMessage) -> str:
-    """Return the first plain‑text part of *msg*, falling back to HTML if needed."""
-    # Prefer a plain text part
+    """Return the first plain‑text part of *msg*, stripping HTML otherwise.
+
+    For multipart messages, prefer a ``text/plain`` part that is not an attachment. If none exists,
+    fall back to the first ``text/html`` part and remove tags with a simple regex.
+    For singlepart messages, decode and strip tags in the same way.
+    """
+
+    def _decode(part):
+        payload = part.get_payload(decode=True)
+        if not payload:
+            return None
+        charset = part.get_content_charset() or "utf-8"
+        try:
+            decoded = payload.decode(charset, errors="replace")
+        except Exception:
+            return None
+        return decoded
+
     if msg.is_multipart():
         for part in msg.walk():
-            content_type = part.get_content_type()
-            disposition = str(part.get("Content-Disposition", ""))
-            if content_type == "text/plain" and "attachment" not in disposition:
-                payload = part.get_payload(decode=True)
-                if payload:
-                    charset = part.get_content_charset() or "utf-8"
-                    return payload.decode(charset, errors="replace")
-        # No plain part, look for HTML
+            ct = part.get_content_type()
+            dis = str(part.get("Content-Disposition", ""))
+            if ct == "text/plain" and "attachment" not in dis:
+                text = _decode(part)
+                if text is not None:
+                    return text
         for part in msg.walk():
-            content_type = part.get_content_type()
-            if content_type == "text/html":
-                payload = part.get_payload(decode=True)
-                if payload:
-                    charset = part.get_content_charset() or "utf-8"
-                    html_text = payload.decode(charset, errors="replace")
-                    # Strip tags naïvely
+            if part.get_content_type() == "text/html":
+                html_text = _decode(part)
+                if html_text is not None:
                     return re.sub(r"<[^>]+>", "", html_text)
     else:
-        payload = msg.get_payload(decode=True)
-        if payload:
-            charset = msg.get_content_charset() or "utf-8"
-            text = payload.decode(charset, errors="replace")
-            # If the message is pure HTML, strip tags
+        text = _decode(msg)
+        if text is not None:
             return re.sub(r"<[^>]+>", "", text)
     return ""
 
@@ -80,12 +90,13 @@ def _get_plain_body(msg: email.message.EmailMessage) -> str:
 # Core logic -------------------------------------------------------------
 
 def _fetch_unread_since(days: int = 3) -> List[Tuple[str, email.message.EmailMessage]]:
-    """Fetch unread messages from the last *days* days.
+    """Return unread messages received in the last *days* days.
 
-    Returns a list of ``(uid, parsed_msg)`` tuples.
+    The UTC date string is formatted for IMAP ``SINCE`` queries.  We always
+    connect via SSL unless the user supplies port 1143, which falls back to a plain
+    connection with ``STARTTLS``.
     """
-    # Calculate date string in IMAP date format (e.g., 01-Jan-2023)
-    since_date = (_dt.datetime.utcnow() - _dt.timedelta(hours=10)).strftime("%d-%b-%Y")
+    since_date = (datetime.utcnow() - timedelta(days=days)).strftime("%d-%b-%Y")
 
     if PROTON_IMAP_PORT == 993:
         imap = imaplib.IMAP4_SSL(PROTON_IMAP_HOST, PROTON_IMAP_PORT)
@@ -96,19 +107,17 @@ def _fetch_unread_since(days: int = 3) -> List[Tuple[str, email.message.EmailMes
     imap.select("INBOX", readonly=True)
 
     typ, data = imap.uid("SEARCH", f"SINCE {since_date} UNSEEN")
-    if typ != "OK":  # pragma: no cover - unlikely in normal conditions
+    if typ != "OK":
         raise RuntimeError("Failed to search for unread messages")
 
-    uids = data[0].split()
-    results = []
+    uids: List[bytes] = data[0].split() if data else []
+    results: List[Tuple[str, email.message.EmailMessage]] = []
     for uid_bytes in uids:
         typ, msg_data = imap.uid("FETCH", uid_bytes.decode(), "(RFC822)")
-        if typ != "OK":  # pragma: no cover
+        if typ != "OK":
             continue
         raw_email = b"".join(part[1] for part in msg_data if isinstance(part, tuple))
-        msg = email.message_from_bytes(raw_email)
-        results.append((uid_bytes.decode(), msg))
-
+        results.append((uid_bytes.decode(), email.message_from_bytes(raw_email)))
     imap.logout()
     return results
 
@@ -117,23 +126,12 @@ def _fetch_unread_since(days: int = 3) -> List[Tuple[str, email.message.EmailMes
 _KEYWORDS: List[str] = ["urgent", "action required", "meeting", "important"]
 
 def _is_important(msg: email.message.EmailMessage) -> dict:
-    """Return a JSON object describing whether the message is important.
+    """Return the LLM analysis as a structured dict.
 
-    The function asks the LLM to return the analysis as valid JSON in the
-    exact form shown below. Any deviation from this shape results in the
-    message being marked as not important.
-    ```json
-    {
-        "sender": "email@example.com",
-        "subject": "Subject line",
-        "timestamp": "2026‑08‑11T12:34:56Z",
-        "important": true,
-        "reason": "brief explanation"
-    }
-    ```
-    If the LLM returns any other format, an empty dictionary is returned.
+    The function builds a concise prompt, sends it to Ollama and returns the parsed
+    JSON.  Any parse failure results in an empty dict – callers treat this as not
+    important.
     """
-    # Basic metadata extraction
     subject = msg.get("Subject", "")
     raw_from = msg.get("From", "")
     sender_addr = email.utils.parseaddr(raw_from)[1]
@@ -147,50 +145,36 @@ def _is_important(msg: email.message.EmailMessage) -> dict:
     body_preview = _get_plain_body(msg).strip()[:750]
 
     prompt = (
-        f"Analyze the following email To determine its important.\n"
+        f"Determine the importance of the following email.\n"
         f"An email is important if it has an urgent impact on personal or family health, finance, or security.\n"
-        f"An email is important ONLY IF it cannot be ignored without grave repercussions for the above.\n"
-        f"Examples of important emails: emails from school, from work, from governments, etc.\n"
-        f"Examples of unimportant emails: marketing, solicitation, community announcements, pet adoptions, politics, social media, etc.\n"
-        f"An email is not important if it can be safely ignored without consequence.\n"
-        f"Output a JSON object with these keys:\n"
-        f"- sender: {sender_addr}\n"
-        f"- subject: {subject}\n"
-        f"- timestamp: {timestamp_iso}\n"
-        f"- important: true/false indicating if the email is important\n"
-        f"- reason: short explanation for the decision\n"
-        f"Provide only the JSON object, nothing else.\n"
+        f"If it can be safely ignored without consequence, it is not important.\n"
+        f"Provide a JSON object with keys: sender, subject, timestamp, important (bool), reason (text).\n"
         f"Email Subject: {subject}\n"
         f"Email Body preview: {body_preview}"
     )
-    #print(f"Prompting LLM for importance analysis:\n{prompt}\n")
+
     client = Client()
-    response = client.chat(model="qwen3:4b", messages=[{"role": "user", "content": prompt}])
+    response = client.chat(model=MODEL, messages=[{"role": "user", "content": prompt}])
     content = None
     if hasattr(response, "message"):
         content = response.message.content.strip()
     else:
-        # In case of non‑chat responses; unlikely but defensive.
-        if hasattr(response, "json"):
-            try:
-                content = response.json()["content"].strip()
-            except Exception:
-                pass
+        try:
+            content = response.json().get("content", "").strip()
+        except Exception:
+            pass
     if not content:
         return {}
 
     try:
         result = json.loads(content)
-        # Ensure all required keys are present.
         req_keys = {"sender", "subject", "timestamp", "important", "reason"}
-
-        print(f"LLM analysis result: {result.get('important', False)} - {result.get('reason', '')}")
-
-        if not isinstance(result, dict) or not req_keys.issubset(result):
-            return {}
-        return result
+        if isinstance(result, dict) and req_keys.issubset(result):
+            return result
     except Exception:
-        return {}
+        pass
+    return {}
+
 
 
 # ---------------------------------------------------------------------------
@@ -220,16 +204,23 @@ def create_digest() -> str:
         snippet_raw = _get_plain_body(current_msg).strip()
         snippet = snippet_raw[:80].replace("\n", " ") + ('…' if len(snippet_raw) > 80 else "")
         body_lines.append(f"- {info['subject']} from {info['sender']}: {snippet}")
-    prompt_body = "\n".join(body_lines)
-    prompt = f"Summarise the following important recent emails into one concise paragraph:\n{prompt_body}"
+    prompt_body = "\\n".join(body_lines)
+    prompt = f"Summarise the following important recent emails into one concise paragraph:\\n{prompt_body}"
     
     client = Client()
-    response = client.chat(model="qwen3:4b", messages=[{"role": "user", "content": prompt}])
+    response = client.chat(model=MODEL, messages=[{"role": "user", "content": prompt}])
     prompt2 = f"Given {response}, advise as to my next three steps."
-    response2 = client.chat(model="qwen3:4b", messages=[{"role": "user", "content": prompt2}])
+    response2 = client.chat(model=MODEL, messages=[{"role": "user", "content": prompt2}])
     if hasattr(response2, "message"):
-        return response2.message.content.strip()
-    return str(response2)
+        summary_text = response2.message.content.strip()
+    else:
+        summary_text = str(response2)
+    # Persist data for later display
+    digest_payload = {"emails": [info for info, _ in important_items], "summary": summary_text}
+    with open("database-digest.json", "w", encoding="utf-8") as f:
+        import json as _json
+        _json.dump(digest_payload, f, indent=2)
+    return summary_text
 
 
 
