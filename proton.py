@@ -102,8 +102,11 @@ Return ONLY JSON:
   "political_spam": true,   // whether the email is political spam
   "sender": "email@email.com",     // just the sender's email address in name@domain.com format, nothing else!
   "timestamp": "ISO 8601 timestamp of email at time of sending", // if available, otherwise empty string
-  "reason": "short explanation" // why you classified it this way-- say why you DID and not why you didn't
+  "reason": "short explanation" // why you classified it this way-- say why you DID and NOT why you didn't
+  "description": "short description of the email content" // a short description (1-2 sentences) of the email content, e.g. 'fundraising for candidate X', 'opposing ballot initiative Y', 'political advocacy for issue Z', etc.
 }}
+
+NOTE: The 'description' field must NEVER mention politics UNLESS the email is actually about politics.
 
 EMAIL:
 
@@ -175,6 +178,7 @@ def save_result(
         "subject": subject,
         "political_spam": bool(result.get("political_spam", False)),
         "reason": result.get("reason", ""),
+        "description": result.get("description", ""),
         "timestamp": result.get("timestamp", ""),
         "classification_method": classification_method,
         "model": MODEL,
