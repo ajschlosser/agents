@@ -1,4 +1,4 @@
-# digest.py
+
 """Generate a summary digest of recent important Proton Mail emails.
 
 The script mirrors the Proton Bridge connection used in :mod:`proton` but is
@@ -20,7 +20,7 @@ from __future__ import annotations
 import datetime
 from datetime import timedelta
 import email
-# (previous email, re, json, os remain)
+
 import imaplib
 import re
 import json
@@ -29,7 +29,7 @@ from ollama import Client
 
 from typing import List, Tuple
 
-# Environment configuration -----------------------------------------------------
+
 try:
     PROTON_USER = os.environ["PROTON_USER"]
 except KeyError:  # pragma: no cover - handled by the developer in tests
@@ -45,8 +45,8 @@ PROTON_IMAP_PORT = int(os.getenv("PROTON_IMAP_PORT", "1143"))
 
 MODEL = "gpt-oss:20b"
 
-# ---------------------------------------------------------------------------
-# Helper utilities --------------------------------------------------------------
+
+
 
 def _get_plain_body(msg: email.message.EmailMessage) -> str:
     """Return the first plain‑text part of *msg*, stripping HTML otherwise.
@@ -86,8 +86,8 @@ def _get_plain_body(msg: email.message.EmailMessage) -> str:
             return re.sub(r"<[^>]+>", "", text)
     return ""
 
-# ---------------------------------------------------------------------------
-# Core logic -------------------------------------------------------------
+
+
 
 def _fetch_unread_since(days: int = 3) -> List[Tuple[str, email.message.EmailMessage]]:
     """Return unread messages received in the last *days* days.
@@ -121,8 +121,8 @@ def _fetch_unread_since(days: int = 3) -> List[Tuple[str, email.message.EmailMes
     imap.logout()
     return results
 
-# ---------------------------------------------------------------------------
-# Heuristics to mark important emails -------------------------------------
+
+
 _KEYWORDS: List[str] = ["urgent", "action required", "meeting", "important"]
 
 def _is_important(msg: email.message.EmailMessage) -> dict:
@@ -177,8 +177,8 @@ def _is_important(msg: email.message.EmailMessage) -> dict:
 
 
 
-# ---------------------------------------------------------------------------
-# Digest generation ------------------------------------------------------------
+
+
 
 def create_digest() -> str:
     """Return a paragraph summarising all important unread emails.
@@ -225,7 +225,7 @@ def create_digest() -> str:
 
 
 
-# ---------------------------------------------------------------------------
-# Command line entry point -----------------------------------------------------
+
+
 if __name__ == "__main__":  # pragma: no cover - manual running only
     print(create_digest())
