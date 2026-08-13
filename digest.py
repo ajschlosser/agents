@@ -19,17 +19,19 @@ from __future__ import annotations
 
 import datetime
 from datetime import timedelta
-import email
+import os
 
 import imaplib
 import re
 import json
-import os
+from email_utils import decode_text, get_plain_body, LLMClient
 from ollama import Client
+
 
 from typing import List, Tuple
 
 
+# The Proton credentials are required but remain unchanged from the original script.
 try:
     PROTON_USER = os.environ["PROTON_USER"]
 except KeyError:  # pragma: no cover - handled by the developer in tests
@@ -48,43 +50,8 @@ MODEL = "gpt-oss:20b"
 
 
 
-def _get_plain_body(msg: email.message.EmailMessage) -> str:
-    """Return the first plain‑text part of *msg*, stripping HTML otherwise.
 
-    For multipart messages, prefer a ``text/plain`` part that is not an attachment. If none exists,
-    fall back to the first ``text/html`` part and remove tags with a simple regex.
-    For singlepart messages, decode and strip tags in the same way.
-    """
 
-    def _decode(part):
-        payload = part.get_payload(decode=True)
-        if not payload:
-            return None
-        charset = part.get_content_charset() or "utf-8"
-        try:
-            decoded = payload.decode(charset, errors="replace")
-        except Exception:
-            return None
-        return decoded
-
-    if msg.is_multipart():
-        for part in msg.walk():
-            ct = part.get_content_type()
-            dis = str(part.get("Content-Disposition", ""))
-            if ct == "text/plain" and "attachment" not in dis:
-                text = _decode(part)
-                if text is not None:
-                    return text
-        for part in msg.walk():
-            if part.get_content_type() == "text/html":
-                html_text = _decode(part)
-                if html_text is not None:
-                    return re.sub(r"<[^>]+>", "", html_text)
-    else:
-        text = _decode(msg)
-        if text is not None:
-            return re.sub(r"<[^>]+>", "", text)
-    return ""
 
 
 
@@ -142,38 +109,23 @@ def _is_important(msg: email.message.EmailMessage) -> dict:
     except Exception:
         timestamp_iso = ""
 
-    body_preview = _get_plain_body(msg).strip()[:750]
+    body_preview = get_plain_body(msg).strip()[:750]
 
-    prompt = (
-        f"Determine the importance of the following email.\n"
-        f"An email is important if it has an urgent impact on personal or family health, finance, or security.\n"
-        f"If it can be safely ignored without consequence, it is not important.\n"
-        f"Provide a JSON object with keys: sender, subject, timestamp, important (bool), reason (text).\n"
-        f"Email Subject: {subject}\n"
-        f"Email Body preview: {body_preview}"
-    )
+    # Use the shared LLM client to classify importance.
+    client = LLMClient(model=MODEL)
+    llm_result = client.classify_importance(sender_addr, subject, body_preview)
 
-    client = Client()
-    response = client.chat(model=MODEL, messages=[{"role": "user", "content": prompt}])
-    content = None
-    if hasattr(response, "message"):
-        content = response.message.content.strip()
-    else:
-        try:
-            content = response.json().get("content", "").strip()
-        except Exception:
-            pass
-    if not content:
+    if not isinstance(llm_result, dict):
         return {}
 
-    try:
-        result = json.loads(content)
-        req_keys = {"sender", "subject", "timestamp", "important", "reason"}
-        if isinstance(result, dict) and req_keys.issubset(result):
-            return result
-    except Exception:
-        pass
-    return {}
+    return {
+        "sender": sender_addr,
+        "subject": subject,
+        "timestamp": timestamp_iso,
+        "important": llm_result.get("important", False),
+        "reason": llm_result.get("reason", ""),
+    }
+
 
 
 
@@ -201,7 +153,7 @@ def create_digest() -> str:
     
     body_lines = []
     for info, current_msg in important_items:
-        snippet_raw = _get_plain_body(current_msg).strip()
+        snippet_raw = get_plain_body(current_msg).strip()
         snippet = snippet_raw[:80].replace("\n", " ") + ('…' if len(snippet_raw) > 80 else "")
         body_lines.append(f"- {info['subject']} from {info['sender']}: {snippet}")
     prompt_body = "\\n".join(body_lines)
@@ -215,6 +167,8 @@ def create_digest() -> str:
         summary_text = response2.message.content.strip()
     else:
         summary_text = str(response2)
+
+
     # Persist data for later display
     digest_payload = {"emails": [info for info, _ in important_items], "summary": summary_text}
     with open("database-digest.json", "w", encoding="utf-8") as f:
