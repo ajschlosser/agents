@@ -64,4 +64,4 @@ These files live at the repo root and can be edited or replaced to tune detectio
 
 ## License
 
-MIT – still the same license, editing test.
+    MIT – still the same license, editing test. Note: this is a test change to demonstrate patching capability.
