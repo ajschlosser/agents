@@ -1,6 +1,6 @@
 # gm‑agent
 
-The **gm‑agent** repo ships lightweight, pure‑Python CLI tools that use IMAP to analyze Gmail and ProtonMail traffic. An Ollama LLM backend flags political spam in unread mail and can optionally generate concise summaries of recent *important* emails.
+ The **gm‑agent** repo ships lightweight, pure‑Python CLI tools that use IMAP to analyze Gmail and ProtonMail traffic. An Ollama LLM backend flags political spam in unread mail and can optionally generate concise summaries of recent *important* emails ⭐
 
 ## Environment variables
 
